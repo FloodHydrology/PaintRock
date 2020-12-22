@@ -21,6 +21,7 @@ library(sf)
 library(raster)
 library(stars)
 library(mapview)
+library(htmlwidgets)
 
 #Define data directories
 data_dir<-"C://WorkspaceR//PaintRock//spatial_data//I_data//"
@@ -30,6 +31,8 @@ output<-"C://WorkspaceR//PaintRock//spatial_data//III_output//"
 #Load DEM and pour points
 dem<-raster(paste0(data_dir,"dem_10m.tif"))
 pp<-st_read(paste0(data_dir, "watershed_outlets.shp"))
+gps<-st_read(paste0(data_dir, "202012_GPS_Tracks.shp"))
+
 
 #Plot in mapview for funzies
 mapview(dem) + mapview(pp)
@@ -37,63 +40,104 @@ mapview(dem) + mapview(pp)
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #Step 2: Delineate Watersheds --------------------------------------------------
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#2.1 Prep DEM~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
-#Export DEM to scratch workspace
-writeRaster(dem, paste0(scratch_dir,"dem.tif"), overwrite=T)
+#2.1 Create function to create watershed shape~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+fun<-function(n){
+  
+  #isolate pp
+  pp<-pp[n,]
 
-#Smooth DEM
-wbt_gaussian_filter(
-  input = "dem.tif", 
-  output = "dem_smoothed.tif",
-  wd = scratch_dir)
+  #Export DEM to scratch workspace
+  writeRaster(dem, paste0(scratch_dir,"dem.tif"), overwrite=T)
 
-#breach depressions
-wbt_breach_depressions(
-  dem =    "dem_smoothed.tif",
-  output = "dem_breached.tif",
-  fill_pits = F,
-  wd = scratch_dir)
+  #Smooth DEM
+  wbt_gaussian_filter(
+    input = "dem.tif", 
+    output = "dem_smoothed.tif",
+    wd = scratch_dir)
+  
+  #breach depressions
+  wbt_breach_depressions(
+    dem =    "dem_smoothed.tif",
+    output = "dem_breached.tif",
+    fill_pits = F,
+    wd = scratch_dir)
 
-#2.2 Create FDR and FAC~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
-#Flow direction raster
-wbt_d8_pointer(
-  dem= "dem_breached.tif",
-  output ="fdr.tif",
-  wd = scratch_dir
-)
+  #Flow direction raster
+  wbt_d8_pointer(
+    dem= "dem_breached.tif",
+    output ="fdr.tif",
+    wd = scratch_dir
+  )
+  
+  #Flow accumulation raster
+  wbt_d8_flow_accumulation(
+    input = "dem_breached.tif",
+    output = "fac.tif",
+    wd = scratch_dir
+  )
 
-#Flow accumulation raster
-wbt_d8_flow_accumulation(
-  input = "dem_breached.tif",
-  output = "fac.tif",
-  wd = scratch_dir
-)
+  #Create Stream Layer
+  stream<-raster(paste0(scratch_dir,"fac.tif"))
+  stream[stream<10000]<-NA
+  writeRaster(stream, paste0(scratch_dir,"stream.tif"), overwrite=T)
 
-#2.3 Snap Pour Point ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
-#Create Stream Layer
-stream<-raster(paste0(scratch_dir,"fac.tif"))
-stream[stream<10000]<-NA
-writeRaster(stream, paste0(scratch_dir,"stream.tif"))
+  #Paste point points in scratch dir
+  st_write(pp, paste0(scratch_dir,"pp.shp"), delete_dsn = T)
 
-#Paste point points in scratch dir
-st_write(pp, paste0(scratch_dir,"pp.shp"), delete_dsn = T)
+  #Snap pour point
+  wbt_jenson_snap_pour_points(
+    pour_pts = "pp.shp", 
+    streams = "stream.tif",
+    snap_dist = 100,
+    output =  "snap.shp",
+    wd= scratch_dir)
 
-#Snap pour point
-wbt_jenson_snap_pour_points(
-  pour_pts = "pp.shp", 
-  streams = "stream.tif",
-  snap_dist = 100,
-  output =  "snap.shp",
-  wd= scratch_dir)
+  #2.4 Delineat watersheds~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
+  wbt_watershed(
+    d8_pntr = "fdr.tif",
+    pour_pts = "snap.shp", 
+    output = "sheds.tif" ,
+    wd=scratch_dir)
 
-#2.4 Delineat watersheds~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 
-wbt_watershed(
-  d8_pntr = "fdr.tif",
-  pour_pts = "snap.shp", 
-  output = "sheds.tif" ,
-  wd=scratch_dir)
+  #load watershed raster into R env
+  sheds<-raster(paste0(scratch_dir,"sheds.tif"))
+  
+  #Convert raster to vector
+  sheds<- sheds %>% st_as_stars() %>% st_as_sf(., merge = TRUE)
+  
+  #Add pp ID
+  sheds$name <-pp$Name
+  
+  #export shape
+  sheds
+}
 
-#Check watersheds
-sheds<-raster(paste0(scratch_dir,"sheds.tif"))
-sheds<- sheds %>% st_as_stars() %>% st_as_sf(., merge = TRUE)
-mapview(sheds) + mapview(pp)
+#2.2 run function~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sheds<-lapply(seq(1,nrow(pp)), fun) %>% bind_rows()
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Step 3: Plot ------------------------------------------------------------------
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Clean up shape 
+sheds<-sheds %>% 
+  #remove unneeded cols
+  dplyr::select(-sheds.tif) %>% 
+  #Calc area
+  mutate(area_ha = st_area(.)) %>% 
+  mutate(area_ha = as.numeric(area_ha)/10000) %>% 
+  filter(area_ha>0.1) %>% 
+  arrange(-area_ha)
+
+#rname rows
+rownames(sheds)<-sheds$name
+
+#plot
+m<-mapview(
+  sheds,
+  zcol="name",  
+  alpha.regions=0.3,
+  map.types=c("OpenTopoMap")) +
+mapview(gps, color="red")
+
+#SAve map file
+mapshot(m,url="sheds.html")
