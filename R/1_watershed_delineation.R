@@ -118,6 +118,10 @@ sheds<-lapply(seq(1,nrow(pp)), fun) %>% bind_rows()
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #Step 3: Plot ------------------------------------------------------------------
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#unload package
+detach("package:whitebox")
+detach("package:stars")
+
 #Clean up shape 
 sheds<-sheds %>% 
   #remove unneeded cols
@@ -140,4 +144,5 @@ m<-mapview(
 mapview(gps, color="red")
 
 #SAve map file
-mapshot(m,url="sheds.html")
+setwd("docs/")
+mapshot(m, "watersheds_6.html")
